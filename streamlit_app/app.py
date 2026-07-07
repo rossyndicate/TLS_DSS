@@ -65,6 +65,15 @@ NOON_HORIZONS   = {h: 12 + (h - 1) * 24 for h in HORIZONS}
 NEEDED_HORIZONS = set(NOON_HORIZONS.values())
 GEFS_VARS       = ['gefs_temp_degC', 'gefs_wind_mps', 'gefs_sol_rad_Wpm2']
 
+# Decreed minimum Colorado River flow required below SMR, by month (cfs).
+CR_BELOW_SMR_ALLOTMENT_CFS = {
+    1: 20, 2: 20, 3: 20, 4: 20, 5: 20,
+    6: 50, 7: 50,
+    8: 40,
+    9: 35, 10: 35,
+    11: 45, 12: 45,
+}
+
 # Okabe-Ito colorblind-safe palette (Nature Methods 2011)
 SCENARIO_COLORS       = ['#E69F00', '#56B4E9', '#009E73', '#CC79A7']
 SCENARIO_COLORS_LIGHT = ['#F4CC7E', '#ABD9F4', '#80CEBC', '#E5BCD4']  # pastel pairs for 0–5m depth
@@ -345,15 +354,37 @@ def get_bakc2_flow_estimates(init_date, bakc2_df, coeff_nf, coeff_ei, coeff_ni):
     return nf_est, ei_est, ni_est
 
 
+def _smrc2_lookup(smrc2_df, issue_dates, target_date):
+    """Return the SMRC2 flow_cfs for target_date, trying each issue date in order."""
+    for issue_date in issue_dates:
+        row = smrc2_df[(smrc2_df['issue_date'] == issue_date) & (smrc2_df['date'] == target_date)]
+        if not row.empty:
+            return float(row.iloc[0]['flow_cfs'])
+    return None
+
+
 def get_smrc2_flow_estimates(init_date, smrc2_df, persist_ei, persist_ni, persist_nf):
-    """Return per-horizon dicts of EI, NI, NF by apportioning the SMRC2 forecast.
+    """Return per-horizon dicts of EI, NI, NF anchored to persistence and moved by
+    the SMRC2 forecast's own trend (anomaly apportionment).
+
+    Rather than treating each day's SMRC2 total as the full EI+NI+NF sum (which
+    overstates tributary inflow whenever SMRC2 includes water beyond those three
+    tributaries), each horizon's estimate is the observed prior-day flow plus a
+    share of the *change* in SMRC2 between the prior day and the target day:
+
+        est_x(h) = persist_x + prop_x * (smrc2(target_date) - smrc2(prev_day))
 
     Proportions are derived from the most recent observed prior-day flows.
-    SMRC2 forecasts start on day 2 (next day after issuance), so h=1 returns None
-    and the caller falls back to persistence.
+    SMRC2 forecasts start on day 2 (next day after issuance), so resolving either
+    the target value or the prev_day baseline can fail — either causes that
+    horizon to return None, and the caller falls back to persistence.
     """
     total = persist_ei + persist_ni + persist_nf
-    if total <= 0 or any(np.isnan(x) for x in (persist_ei, persist_ni, persist_nf)):
+    if any(np.isnan(x) for x in (persist_ei, persist_ni, persist_nf)):
+        return ({h: None for h in HORIZONS},
+                {h: None for h in HORIZONS},
+                {h: None for h in HORIZONS})
+    if total <= 0:
         prop_ei = prop_ni = prop_nf = 1 / 3
     else:
         prop_ei = persist_ei / total
@@ -365,21 +396,18 @@ def get_smrc2_flow_estimates(init_date, smrc2_df, persist_ei, persist_ni, persis
     ni_est = {}
     prev_day = init_date - pd.Timedelta(days=1)
 
-    issued_today = smrc2_df[smrc2_df['issue_date'] == init_date]
-    issued_prev  = smrc2_df[smrc2_df['issue_date'] == prev_day]
+    smrc2_baseline = _smrc2_lookup(smrc2_df, [prev_day, prev_day - pd.Timedelta(days=1)], prev_day)
 
     for h in HORIZONS:
         target_date = init_date + pd.Timedelta(days=h - 1)
-        row = issued_today[issued_today['date'] == target_date]
-        if row.empty:
-            row = issued_prev[issued_prev['date'] == target_date]
-        if row.empty:
+        smrc2_cfs = _smrc2_lookup(smrc2_df, [init_date, prev_day], target_date)
+        if smrc2_cfs is None or smrc2_baseline is None:
             nf_est[h] = ei_est[h] = ni_est[h] = None
             continue
-        smrc2_cfs = float(row.iloc[0]['flow_cfs'])
-        ei_est[h] = max(1, smrc2_cfs * prop_ei)
-        ni_est[h] = max(1, smrc2_cfs * prop_ni)
-        nf_est[h] = max(1, smrc2_cfs * prop_nf)
+        delta = smrc2_cfs - smrc2_baseline
+        ei_est[h] = max(1, persist_ei + prop_ei * delta)
+        ni_est[h] = max(1, persist_ni + prop_ni * delta)
+        nf_est[h] = max(1, persist_nf + prop_nf * delta)
 
     return nf_est, ei_est, ni_est
 
@@ -790,6 +818,10 @@ def compute_water_balance(pump_schedule, abt_schedule, ei_flows, ni_flows, nf_fl
     SMR outflow = total_inflow - ABT (excludes chipmunk, which is an
     intermediate gauge, not an independent source).
     ei_flows/ni_flows/nf_flows are dicts keyed by horizon h=1..7.
+
+    Flags 'Deficit' when SMR outflow is negative (reservoir volume drawn down),
+    and separately 'Below CR Min' when SMR outflow is positive but still short
+    of the decreed CR-below-SMR minimum flow for that month.
     """
     rows = []
     for j in range(7):
@@ -800,8 +832,10 @@ def compute_water_balance(pump_schedule, abt_schedule, ei_flows, ni_flows, nf_fl
         chipmunk = ei + ni - abt_schedule[j]
         total_in = pump_schedule[j] + ei + ni + nf
         smr_out  = total_in - abt_schedule[j]
+        date     = init_date + pd.Timedelta(days=j)
+        cr_min   = CR_BELOW_SMR_ALLOTMENT_CFS[date.month]
         rows.append({
-            'Date':               (init_date + pd.Timedelta(days=j)).date(),
+            'Date':               date.date(),
             'Farr Pump (cfs)':    pump_schedule[j],
             'EI (cfs)':           round(ei, 1),
             'NI (cfs)':           round(ni, 1),
@@ -810,7 +844,9 @@ def compute_water_balance(pump_schedule, abt_schedule, ei_flows, ni_flows, nf_fl
             'Adams Tunnel (cfs)': abt_schedule[j],
             'Chipmunk (cfs)':     round(chipmunk, 1),
             'SMR Outflow (cfs)':  round(smr_out, 1),
+            'CR Min Req (cfs)':   cr_min,
             'Deficit':            smr_out < 0,
+            'Below CR Min':       smr_out < cr_min,
         })
     return pd.DataFrame(rows)
 
@@ -1130,7 +1166,8 @@ with st.sidebar:
     _smrc2_note = ("**We are working to get the backdated SMRC2 streamflow forecasts (NOAA's deterministic forecast that encompases NF, NI, EI flows). No stremflow forecast is available for this date — prior-day persistence used for all tributary inflows.**"
                    if not _smrc2_available else "")
     st.caption(
-        f"**Tributary inflow forecast** uses SMRC2 proportional apportionment. "
+        f"**Tributary inflow forecast** anchors to prior-day observed flows and moves "
+        f"with the SMRC2 forecast trend (anomaly apportionment). "
         f"Proportions are based on {prev_date.strftime('%b %-d')} observed flows "
         f"(EI {persist_ei:.0f} cfs, NI {persist_ni:.0f} cfs, NF {persist_nf:.0f} cfs).\n\n"
         f"{_smrc2_note}"
@@ -1250,6 +1287,10 @@ with st.sidebar:
                 if not _deficit_rows.empty:
                     day_strs = ', '.join(str(d) for d in _deficit_rows['Date'])
                     st.warning(f"Inflow < AT on: {day_strs} — reservoir volume will be impacted.")
+                _cr_min_rows = _wb[_wb['Below CR Min'] & ~_wb['Deficit']]
+                if not _cr_min_rows.empty:
+                    day_strs = ', '.join(str(d) for d in _cr_min_rows['Date'])
+                    st.warning(f"SMR Outflow below required CR minimum flow on: {day_strs}.")
 
     _current_names     = [st.session_state.get(f'sc_name_{sc["id"]}', sc['name'])
                           for sc in st.session_state.scenarios]
@@ -1454,8 +1495,10 @@ if 'forecast_df' in st.session_state:
         st.caption(
             "SMR volume is constant. Total inflow = Farr Pump + EI + NI + NF. "
             "Chipmunk (estimated) = EI + NI − AT. "
-            "SMR Outflow = Total Inflow − AT. Rows where inflow < AT are flagged "
-            "— the reservoir cannot sustain that operation without drawing down volume."
+            "SMR Outflow = Total Inflow − AT. Rows where inflow < AT are flagged in red "
+            "— the reservoir cannot sustain that operation without drawing down volume. "
+            "Rows where SMR Outflow is below the decreed CR-below-SMR minimum flow "
+            "('CR Min Req') are flagged in yellow."
         )
         if 'water_balance' in st.session_state:
             _wb_dict = st.session_state['water_balance']
@@ -1469,10 +1512,19 @@ if 'forecast_df' in st.session_state:
                 if not deficit_rows.empty:
                     day_strs = ', '.join(str(d) for d in deficit_rows['Date'])
                     st.warning(f"Inflow < AT on: {day_strs} — reservoir volume will be impacted.")
-                disp_wb = wb.drop(columns=['Deficit']).reset_index(drop=True)
+                cr_min_rows = wb[wb['Below CR Min'] & ~wb['Deficit']]
+                if not cr_min_rows.empty:
+                    day_strs = ', '.join(str(d) for d in cr_min_rows['Date'])
+                    st.warning(f"SMR Outflow below required CR minimum flow on: {day_strs}.")
+                disp_wb = wb.drop(columns=['Deficit', 'Below CR Min']).reset_index(drop=True)
 
                 def _style_row(row):
-                    style = 'background-color: #ffe0e0; color: black' if row['SMR Outflow (cfs)'] < 0 else ''
+                    if row['SMR Outflow (cfs)'] < 0:
+                        style = 'background-color: #ffe0e0; color: black'
+                    elif row['SMR Outflow (cfs)'] < row['CR Min Req (cfs)']:
+                        style = 'background-color: #fff3cd; color: black'
+                    else:
+                        style = ''
                     return [style] * len(row)
 
                 st.dataframe(

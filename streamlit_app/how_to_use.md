@@ -69,13 +69,15 @@ A day-by-day breakdown of SMR inflows and outflows for each scenario:
 | Adams Tunnel | Delivery out of SMR you specified |
 | SMR Outflow | Total In minus Adams Tunnel |
 
-Rows where **SMR Outflow < 0** are highlighted in red — those days would require drawing down reservoir storage.
+Rows where **SMR Outflow < 0** are highlighted in red — those days would require drawing down reservoir storage. Rows where SMR Outflow is positive but still **below the decreed CR-below-SMR minimum flow** for that month (20 cfs Jan–May, 50 cfs Jun–Jul, 40 cfs Aug, 35 cfs Sep–Oct, 45 cfs Nov–Dec) are highlighted in yellow — that operation would not meet the required in-river flow below SMR even though the reservoir itself is not drawing down.
 
-**How tributary inflows are estimated:** The app uses the CBRFC **SMRC2** forecast (total streamflow at Shadow Mountain Reservoir) to project East Inlet, North Inlet, and North Fork flows over the 7-day window. Because SMRC2 gives only a combined total, it is apportioned to the three tributaries using the proportions observed on the prior day:
+**How tributary inflows are estimated:** The app uses the CBRFC **SMRC2** forecast (total streamflow at Shadow Mountain Reservoir) to project East Inlet, North Inlet, and North Fork flows over the 7-day window. Rather than treating each day's SMRC2 total as if it were the full EI+NI+NF sum, the estimate is anchored to the prior day's observed flows and moved only by SMRC2's own forecast *trend*:
 
-> prop(EI) = EI_observed / (EI + NI + NF)_observed, and similarly for NI and NF.
+> est(EI, day h) = EI_observed(prior day) + prop(EI) × [SMRC2(day h) − SMRC2(prior day)], and similarly for NI and NF,
+>
+> where prop(EI) = EI_observed / (EI + NI + NF)_observed (prior day), and similarly for NI and NF.
 
-Each day's SMRC2 forecast total is then multiplied by those fixed proportions to get per-tributary estimates (minimum 1 cfs applied to each). **Day 1** always uses prior-day observed values directly, since the SMRC2 forecast does not issue a same-day value. If SMRC2 data are unavailable for any day, that day also falls back to prior-day observed values (persistence). The proportions used are shown in the sidebar caption beneath the initialization date.
+This keeps the forecast tethered to real observed conditions instead of substituting in SMRC2's total outright, which previously produced an unrealistic, persistent increase in flow whenever SMRC2 ran higher than the actual EI+NI+NF sum. A minimum of 1 cfs is still applied to each tributary estimate. **Day 1** always uses prior-day observed values directly, since the SMRC2 forecast does not issue a same-day value. If SMRC2 data are unavailable for the target day or the prior-day baseline, that day falls back to prior-day observed values (persistence). The proportions used are shown in the sidebar caption beneath the initialization date.
 
 #### Scenario Comparison
 

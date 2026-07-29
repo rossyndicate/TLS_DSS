@@ -6,11 +6,10 @@ operational pumping regimes.
 
 The code in this repository is covered by the MIT use license. We request that 
 all downstream uses of this work be available to the public when possible. During
-development of the code in this repository, AI (ChatGPT) was used to help create 
-the architecture for the Shiny App and was also used to help with coding the 
+development of the code in this repository, AI (Claude) was used to help create 
+the architecture for the Streamlit App and was also used to help with coding the 
 rollout of the forecast in Python, most code was modified in part or whole after 
-creation by ChatGPT. The streamlit app was aided by Claude Code in the same manner
-as described here.
+creation by Claude through careful human review.
 
 Repository contact: B Steele (b dot steele at colostate dot edu)
 

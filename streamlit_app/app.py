@@ -1320,6 +1320,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+st.warning(
+    "Due to the low elevation and warm water temperatures in Granby Reservoir, "
+    "the forecast tool is not currently reliable for operational decision-making "
+    "support. We encourage users to provide feedback on the user experience of "
+    "the tool via the **Contact / Suggest** link in the sidebar."
+)
+
 if not can_run and not gefs_ok:
     st.info("Select a date that has an available GEFS operational file to enable the forecast.")
 

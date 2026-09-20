@@ -72,6 +72,11 @@ def fetch_member(dt_str, member):
             'v10':     float(vgrd_steps.sel(step=step)['v10']),
             'sdswrf':  float(rad_steps.sel(step=step)['sdswrf']),
         })
+
+    # Release the underlying GRIB file handles now rather than at interpreter
+    # shutdown, where eccodes/cfgrib has been seen to corrupt the heap.
+    for ds in (ds_t2m, ds_ugrd, ds_vgrd, ds_rad):
+        ds.close()
     return records
 
 
@@ -122,3 +127,10 @@ if __name__ == '__main__':
 
     run_date = args.date if args.date else date.today().strftime('%Y-%m-%d')
     fetch_smr_gefs(run_date)
+
+    # The CSV is already written at this point. Exit without running native
+    # library teardown, which intermittently aborts with "corrupted size vs.
+    # prev_size" (exit 134) after eccodes/cfgrib has opened many GRIB files.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)

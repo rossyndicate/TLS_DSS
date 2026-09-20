@@ -16,6 +16,11 @@ on:
         required: false
         default: ''
 
+env:
+  # Run JavaScript actions (e.g. nick-fields/retry, r-lib/actions) on Node 24;
+  # Node 20 is deprecated on GitHub-hosted runners.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
